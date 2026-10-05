@@ -1,13 +1,8 @@
-xml_true = "The market was a <Metaphor> roller coaster </Metaphor> yesterday , and many called it a <Metaphor> bloodbath </Metaphor> ."
-xml_pred = "The market was a <Metaphor> roller </Metaphor> coaster yesterday , and many called it a <Metaphor> total bloodbath </Metaphor> ."
-print("xml_true:\n", xml_true)
-print("\nxml_pred:\n", xml_pred)
+import pandas as pd
+from src.visualization import visualize, save_html
 
-from src.evaluation import do_praf
-results = do_praf(xml_true, xml_pred, "Metaphor")
+ex = pd.read_csv("results/Example.csv")
+gold = pd.read_csv("corpus/metaphor_dataset.csv").set_index("textid")
 
-print(results.precision)
-print(results.recall)
-print(results.accuracy)
-print(results.f1)
-print(results.confusion_matrix)
+row = ex[ex.prompt_strategy == "Zero shot"].iloc[0]
+save_html(visualize(row["answer"], gold.loc[row["textid"], "metaphor_tagged_text"]), "outputs/example.html")

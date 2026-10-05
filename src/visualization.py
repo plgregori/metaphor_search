@@ -1,6 +1,8 @@
-from src.evaluation import xml_to_bin,needleman_wunsch_tokens
 from pydantic import BaseModel
-import re
+from html import escape
+from src.evaluation import xml_to_bin, needleman_wunsch_indices
+from pathlib import Path
+
 
 class Token (BaseModel):
     text: str
@@ -8,100 +10,101 @@ class Token (BaseModel):
 
 # Colors for categories
 COLORS = {
-    'TP': '#d3f9d8',       # green-ish
-    'FP': '#ffe3e3',       # red-ish
-    'FN': '#fff3bf',       # yellow-ish
-    'MISMATCH': '#e9ecef', # gray
+    'TP': '#d3f9d8',  # green: metaphor in both
+    'FP': '#ffe3e3',  # red: metaphor only in prediction
+    'FN': '#fff3bf',  # yellow: metaphor only in ground truth
 }
+FONT = "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto"
 
 def tokenize_with_metaphor(xml_text: str, tag_name: str = "Metaphor") -> list[Token]:
     y_bin, y_bin_ref = xml_to_bin(xml_text, tag_name)
     return [Token(text=tok, is_metaphor=bool(flag)) for tok, flag in zip(y_bin_ref, y_bin)]
 
-def needs_space(prev: str | None, curr: str | None) -> bool:
-    """Basic English-ish spacing: no space before punctuation, add space between words."""
-    if prev is None or curr is None:
-        return False
-    if re.fullmatch(r"[^\w\s]", curr):  # current is punctuation
-        return False
-    if re.fullmatch(r"[^\w\s]", prev):  # previous is punctuation
-        return True
-    return True
 
 def tokens_to_html(tokens: list[Token],
                    metaphor_color: str = "#fff3bf",
                    text_color: str = "#000") -> str:
-    html = ["<div style='line-height:1.8; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto;'>"]
-    prev = None
+    spans: list[str] = []
     for t in tokens:
-        if needs_space(prev, t.text):
-            html.append(" ")
         style = f"background:{metaphor_color}; padding:2px 3px; border-radius:4px;" if t.is_metaphor else ""
         title = "Metaphor" if t.is_metaphor else "Literal/Other"
-        html.append(f"<span title='{title}' style='{style} color:{text_color};'>{t.text}</span>")
-        prev = t.text
-    html.append("</div>")
-    return ''.join(html)
+        spans.append(f"<span title='{title}' style='{style} color:{text_color};'>{escape(t.text)}</span>")
+    return f"<div style='line-height:1.8; font-family:{FONT};'>" + " ".join(spans) + "</div>"
 
-def align_tokens(pred_toks: list[str], gt_toks: list[str]) -> list[tuple[str | None, str | None]]:
-    return needleman_wunsch_tokens(pred_toks, gt_toks)
+def align_for_display(pred_toks: list[Token], gt_toks: list[Token]) -> list[tuple[Token | None, Token | None]]:
+    """Same alignment do_praf computes: ground truth first, prediction second.
+    Returns (pred_token, gt_token) pairs; None marks a gap."""
+    pairs = needleman_wunsch_indices([t.text for t in gt_toks], [t.text for t in pred_toks])
+    return [
+        (pred_toks[j] if j is not None else None,
+         gt_toks[i] if i is not None else None)
+        for i, j in pairs
+    ]
+
+def classify_pair(pred: Token | None, gt: Token | None) -> str:
+    """TP/FP/FN/TN using the flags of each aligned position, a gap counting as 0 (as in do_praf)."""
+    p = pred.is_metaphor if pred is not None else False
+    g = gt.is_metaphor if gt is not None else False
+    if p and g:
+        return 'TP'
+    if p:
+        return 'FP'
+    if g:
+        return 'FN'
+    return 'TN'
+
+def count_categories(aligned: list[tuple[Token | None, Token | None]]) -> dict[str, int]:
+    counts = {'TP': 0, 'FP': 0, 'FN': 0, 'TN': 0}
+    for pred, gt in aligned:
+        counts[classify_pair(pred, gt)] += 1
+    return counts
+
+def _cell(tok: Token | None, side: str, cat: str, differs: bool) -> str:
+    background = f"background:{COLORS[cat]};" if cat in COLORS else ""
+    border = "border:1px dashed #868e96;" if differs else "border:1px solid transparent;"
+    if tok is None:
+        title, text = f"{side}: (gap)", "—"
+    else:
+        title = f"{side}: {'Metaphor' if tok.is_metaphor else 'Not Metaphor'}"
+        text = escape(tok.text)
+    return (f"<span title='{title}' style='padding:2px 4px; border-radius:4px; {background} {border} "
+            f"margin:1px; display:inline-block'>{text}</span>")
 
 def aligned_html(pred_toks: list[Token], gt_toks: list[Token]) -> str:
-    pred_words = [t.text for t in pred_toks]
-    gt_words = [t.text for t in gt_toks]
-    alignment = align_tokens(pred_words, gt_words)
+    aligned = align_for_display(pred_toks, gt_toks)
 
-    # Map words -> metaphor flags in order (with counters for duplicates)
-    from collections import defaultdict, deque
-    pred_queue = defaultdict(deque)
-    gt_queue = defaultdict(deque)
-    for idx, t in enumerate(pred_toks):
-        pred_queue[t.text].append(t.is_metaphor)
-    for idx, t in enumerate(gt_toks):
-        gt_queue[t.text].append(t.is_metaphor)
+    pred_cells: list[str] = []
+    gt_cells: list[str] = []
+    for pred, gt in aligned:
+        cat = classify_pair(pred, gt)
+        differs = pred is None or gt is None or pred.text != gt.text
+        pred_cells.append(_cell(pred, "Pred", cat, differs))
+        gt_cells.append(_cell(gt, "GT", cat, differs))
 
-    rows = ["<div style='font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto'>"]
-    rows.append("<div style='margin-bottom:8px'><strong>Legend:</strong> " +
-                "&nbsp; <span style='background:%s;padding:2px 6px;border-radius:4px'>TP</span>" % COLORS['TP'] +
-                "&nbsp; <span style='background:%s;padding:2px 6px;border-radius:4px'>FP</span>" % COLORS['FP'] +
-                "&nbsp; <span style='background:%s;padding:2px 6px;border-radius:4px'>FN</span>" % COLORS['FN'] +
-                "&nbsp; <span style='background:%s;padding:2px 6px;border-radius:4px'>Mismatch</span>" % COLORS['MISMATCH'] +
-                "</div>")
+    counts = count_categories(aligned)
+    legend = ("<div style='margin-bottom:8px'><strong>Legend:</strong> " +
+              "".join(f"&nbsp; <span style='background:{COLORS[c]};padding:2px 6px;border-radius:4px'>{c}</span>"
+                      for c in COLORS) +
+              "&nbsp; <span style='border:1px dashed #868e96;padding:2px 6px;border-radius:4px'>tokens differ / gap</span>"
+              f"&nbsp; &nbsp; TP={counts['TP']} FP={counts['FP']} FN={counts['FN']} TN={counts['TN']}</div>")
 
-    # Build two aligned rows
-    pred_cells = []
-    gt_cells = []
-    for a, b in alignment:
-        a_is_meta = None
-        b_is_meta = None
-        if a is not None:
-            a_is_meta = pred_queue[a].popleft() if pred_queue[a] else False
-        if b is not None:
-            b_is_meta = gt_queue[b].popleft() if gt_queue[b] else False
+    return (f"<div style='font-family:{FONT}'>" + legend +
+            "<div style='margin:6px 0'><strong>Predicted (aligned):</strong><br>" + " ".join(pred_cells) + "</div>"
+            "<div style='margin:6px 0'><strong>Ground truth (aligned):</strong><br>" + " ".join(gt_cells) + "</div>"
+            "</div>")
 
-        if a is None or b is None or a != b:
-            cat = 'MISMATCH'
-        else:
-            if a_is_meta and b_is_meta:
-                cat = 'TP'
-            elif a_is_meta and not b_is_meta:
-                cat = 'FP'
-            elif (not a_is_meta) and b_is_meta:
-                cat = 'FN'
-            else:
-                cat = None  # matched non-metaphor token
+def visualize(predicted_text: str, ground_truth_text: str, tag_name: str = "Metaphor") -> str:
+    pred_tokens = tokenize_with_metaphor(predicted_text, tag_name)
+    gt_tokens = tokenize_with_metaphor(ground_truth_text, tag_name)
+    return (
+        "<h3>(1) Metaphor highlighting only</h3>"
+        "<div style='display:flex; gap:24px; flex-wrap:wrap'>"
+        f"<div><div style='font-weight:600; margin-bottom:6px'>Predicted</div>{tokens_to_html(pred_tokens, '#fff3bf')}</div>"
+        f"<div><div style='font-weight:600; margin-bottom:6px'>Ground Truth</div>{tokens_to_html(gt_tokens, '#cfe8ff')}</div>"
+        "</div>"
+        "<h3>(2) Alignment with TP / FP / FN</h3>" + aligned_html(pred_tokens, gt_tokens)
+    )
 
-        style = f"background:{COLORS[cat]};" if cat else ""
-        title_pred = f"Pred: {'Metaphor' if a_is_meta else 'Not Metaphor'}" if a is not None else "Pred: (gap)"
-        title_gt   = f"GT: {'Metaphor' if b_is_meta else 'Not Metaphor'}" if b is not None else "GT: (gap)"
-
-        pred_tok_html = a if a is not None else "—"
-        gt_tok_html   = b if b is not None else "—"
-
-        pred_cells.append(f"<span title='{title_pred}' style='padding:2px 4px; border-radius:4px; {style} margin:1px; display:inline-block'>{pred_tok_html}</span>")
-        gt_cells.append(  f"<span title='{title_gt}'   style='padding:2px 4px; border-radius:4px; {style} margin:1px; display:inline-block'>{gt_tok_html}</span>")
-
-    rows.append("<div style='margin:6px 0'><strong>Predicted (aligned):</strong><br>" + ' '.join(pred_cells) + "</div>")
-    rows.append("<div style='margin:6px 0'><strong>Ground truth (aligned):</strong><br>" + ' '.join(gt_cells) + "</div>")
-    rows.append("</div>")
-    return ''.join(rows)
+def save_html(body: str, path: str | Path) -> None:
+    Path(path).write_text(f"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>{body}</body></html>",
+                          encoding="utf-8")
