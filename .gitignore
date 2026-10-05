@@ -2,3 +2,7 @@ venv
 old
 .env
 outputs
+temp.py
+results
+demo.py
+tests
