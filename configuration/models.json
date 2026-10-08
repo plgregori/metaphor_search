@@ -1,12 +1,4 @@
 {
-    "qwen-2.5-3b": {
-        "provider": "ollama",
-        "model_id": "qwen2.5:3b",
-        "hf_id": null,
-        "fine_tuning": false,
-        "rag": true,
-        "prompt_engineering": true
-    },
     "llama3.2-1b": {
         "provider": "ollama",
         "model_id": "llama3.2:1b",
