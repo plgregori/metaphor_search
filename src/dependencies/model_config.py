@@ -6,9 +6,9 @@ import os
 from pathlib import Path
 from typing import Literal, Self
 from ollama import AsyncClient, ResponseError
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator, field_validator
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 class ConfigError(ValueError):
     """Models configuration file missing, unreadable or invalid."""
@@ -25,6 +25,11 @@ class ModelConfig(BaseModel):
     rag: bool
     prompt_engineering: bool
 
+    @field_validator("hf_id", mode="before")
+    @classmethod
+    def _blank_hf_id_is_none(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value   # an empty form box means "not set"
+
     @model_validator(mode="after")
     def _hf_id_for_local_fine_tuning(self) -> Self:
         if self.provider == "ollama" and self.fine_tuning and not self.hf_id:
@@ -32,7 +37,7 @@ class ModelConfig(BaseModel):
         return self
 
 class PullState(BaseModel):
-    state: Literal["pulling", "done", "failed"]
+    state: Literal["queued", "pulling", "done", "failed"]
     percent: float | None = None   # progress of the layer being downloaded
     detail: str | None = None
 
@@ -50,6 +55,7 @@ class ModelManager():
         self.ollama_url = ollama_url
         self.pulls: dict[str, PullState] = {}
         self._pull_tasks: dict[str, "asyncio.Task[None]"] = {}
+        self._startup_task: "asyncio.Task[None] | None" = None
         self.ollama_client = AsyncClient(host=self.ollama_url)
 
     @classmethod
@@ -106,12 +112,11 @@ class ModelManager():
             self.pulls[model_name] = PullState(state="failed", detail=str(e))
 
     def start_pull(self, model_name: str) -> None:
-        task = self._pull_tasks.get(model_name)
-        if task is not None and not task.done():
-            return                                          # already downloading
+        current = self.pulls.get(model_name)
+        if current is not None and current.state in ("queued", "pulling"):
+            return                                          # already downloading, or waiting its turn at startup
         self.pulls[model_name] = PullState(state="pulling")
         self._pull_tasks[model_name] = asyncio.create_task(self._pull(model_name))
-
 
     async def add_model(self, model_name: str, model_config: ModelConfig) -> bool:
         """Registers the model in memory and in models.json. Returns True if a download was started."""
@@ -153,9 +158,56 @@ class ModelManager():
                 result[alias] = self.is_pulled(config.model_id, available)
         return result
 
+
+    async def _pull_in_sequence(self, aliases: list[str]) -> None:
+        failed: list[str] = []
+        for position, alias in enumerate(aliases, start=1):
+            tag = self.model_config_dict[alias].model_id
+            logger.info("[%d/%d] Downloading %s (%s)...", position, len(aliases), alias, tag)
+            self.pulls[alias] = PullState(state="pulling")
+            await self._pull(alias)                          # never raises, except when cancelled
+            state = self.pulls[alias]
+            if state.state == "done":
+                logger.info("[%d/%d] Downloaded %s (%s).", position, len(aliases), alias, tag)
+            else:
+                failed.append(alias)
+                logger.error("[%d/%d] Download of %s (%s) failed: %s", position, len(aliases), alias, tag, state.detail)
+        if failed:
+            logger.warning("Startup downloads finished, %d failed: %s. Retry with POST /models/{alias}/pull.",
+                           len(failed), ", ".join(failed))
+        else:
+            logger.info("Startup downloads finished.")
+
+    async def pull_missing(self) -> list[str]:
+        """Downloads, one after the other, every ollama model of models.json that Ollama does not have yet.
+        Returns the aliases to download; the downloads themselves run in a background task."""
+        ollama_models = {alias: config for alias, config in self.model_config_dict.items()
+                         if config.provider == "ollama"}
+        try:
+            available = await self.list_ollama_models()
+        except ConnectionError as e:
+            logger.warning("Startup model check skipped, Ollama is not reachable: %s", e)
+            return []
+
+        missing = [alias for alias, config in ollama_models.items()
+                   if not self.is_pulled(config.model_id, available)]
+        if not missing:
+            logger.info("Startup model check: all %d ollama model(s) are already available.", len(ollama_models))
+            return []
+
+        logger.info("Startup model check: %d of %d ollama model(s) missing: %s", len(missing), len(ollama_models),
+                    ", ".join(f"{alias} ({ollama_models[alias].model_id})" for alias in missing))
+        for alias in missing:
+            self.pulls[alias] = PullState(state="queued")
+        self._startup_task = asyncio.create_task(self._pull_in_sequence(missing))
+        return missing
+
     async def close(self) -> None:
         """Cancels downloads still running when the app shuts down."""
-        for task in self._pull_tasks.values():
+        tasks = list(self._pull_tasks.values())
+        if self._startup_task is not None:
+            tasks.append(self._startup_task)
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*self._pull_tasks.values(), return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
         await self.ollama_client.close()
