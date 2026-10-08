@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, Self
 from ollama import AsyncClient, ResponseError
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator, field_validator
+from datetime import datetime, timezone
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -42,12 +43,18 @@ class ModelConfig(BaseModel):
             raise ValueError("Hugging Face id is required for an ollama model with fine_tuning enabled")
         return self
 
+class HistoryEntry(BaseModel):
+    config: ModelConfig
+    deleted_at: datetime
+    removed_from_ollama: bool
+
 class PullState(BaseModel):
     state: Literal["queued", "pulling", "done", "failed"]
     percent: float | None = None   # progress of the layer being downloaded
     detail: str | None = None
 
 _MODELS_ADAPTER = TypeAdapter(dict[str, ModelConfig])
+_HISTORY_ADAPTER = TypeAdapter(dict[str, HistoryEntry])
 
 class ModelManager():
     model_config_dict: dict[str, ModelConfig]
@@ -55,9 +62,12 @@ class ModelManager():
     ollama_url: str
     ollama_client: AsyncClient
 
-    def __init__(self, model_config_dict: dict[str, ModelConfig], model_config_path: str, ollama_url: str) -> None:
+    def __init__(self, model_config_dict: dict[str, ModelConfig], model_config_path: str, ollama_url: str,
+                 model_history_path: str, model_history: dict[str, HistoryEntry]) -> None:
         self.model_config_dict = model_config_dict
         self.model_config_path = model_config_path
+        self.model_history_path = model_history_path
+        self.model_history = model_history
         self.ollama_url = ollama_url
         self.pulls: dict[str, PullState] = {}
         self._pull_tasks: dict[str, "asyncio.Task[None]"] = {}
@@ -65,7 +75,7 @@ class ModelManager():
         self.ollama_client = AsyncClient(host=self.ollama_url)
 
     @classmethod
-    def load_from_json(cls, model_config_path: str, ollama_url: str) -> "ModelManager":
+    def load_from_json(cls, model_config_path: str, ollama_url: str, model_history_path: str) -> "ModelManager":
         path = Path(model_config_path)
         try:
             text = path.read_text(encoding="utf-8")
@@ -82,7 +92,24 @@ class ModelManager():
         except ValidationError as e:
             raise ConfigError(f"{path} has an invalid model configuration:\n{e}") from e
 
-        return cls(models, model_config_path, ollama_url)
+        return cls(models, model_config_path, ollama_url, model_history_path, cls._load_history(model_history_path))
+
+    @staticmethod
+    def _load_history(model_history_path: str) -> dict[str, HistoryEntry]:
+        path = Path(model_history_path)
+        if not path.exists():
+            return {}                       # the file is created the first time a model is deleted
+        try:
+            return _HISTORY_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValidationError) as e:
+            raise ConfigError(f"Model history file could not be read ({path}): {e}") from e
+
+    def save_history(self) -> None:
+        path = Path(self.model_history_path)
+        path.parent.mkdir(parents=True, exist_ok=True)      # creates data/ if needed
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(_HISTORY_ADAPTER.dump_json(self.model_history, indent=4))
+        os.replace(tmp, path)
 
     def save(self) -> None:
         path = Path(self.model_config_path)
@@ -262,7 +289,29 @@ class ModelManager():
             raise ConfigError(f"Could not write {self.model_config_path}: {e}") from e
         self.pulls.pop(model_name, None)                              # so a re-added alias doesn't inherit an old status
         self._pull_tasks.pop(model_name, None)
+        self.model_history[model_name] = HistoryEntry(config=config, deleted_at=datetime.now(timezone.utc),
+                                                    removed_from_ollama=removed_from_ollama)
+        try:
+            self.save_history()
+        except OSError:
+            # The model is already deleted: don't fail the request. It stays restorable until the app restarts.
+            logger.exception("Could not write %s", self.model_history_path)
         return removed_from_ollama
+
+    async def restore_model(self, model_name: str) -> bool:
+        """Puts a deleted model back (memory + models.json) with its saved parameters, and pulls it if Ollama
+        doesn't have it. Returns True if a download was started.
+        Raises UnknownModelError, DuplicateModelError, ConnectionError or ConfigError."""
+        entry = self.model_history.get(model_name)
+        if entry is None:
+            raise UnknownModelError(f"{model_name} is not in the deleted models history.")
+        pulling = await self.add_model(model_name, entry.config)   # duplicate check, Ollama check, save, pull
+        self.model_history.pop(model_name, None)
+        try:
+            self.save_history()
+        except OSError:
+            logger.exception("Could not write %s", self.model_history_path)
+        return pulling
 
     async def close(self) -> None:
         """Cancels downloads still running when the app shuts down."""
