@@ -1,8 +1,8 @@
 from typing import Annotated
-from fastapi import APIRouter, Depends, Form, HTTPException, Path, Request, Response
 from pydantic import BaseModel, ConfigDict, ValidationError
+from fastapi import APIRouter, Depends, Form, HTTPException, Path, Query, Request, Response
 from src.dependencies.model_config import (ConfigError, ModelConfig, ModelManager, PullState,
-                                              DuplicateModelError, UnknownModelError)
+                                           DuplicateModelError, UnknownModelError, DeleteBlockedError)
 
 router = APIRouter(prefix="/models", tags=["Models"])
 
@@ -20,6 +20,11 @@ class ModelEntry(BaseModel):
     config: ModelConfig
     available: bool | None = None   # None = not checked (not an ollama model, or Ollama unreachable)
     pull: PullState | None = None
+
+class DeleteResult(BaseModel):
+    alias: str
+    removed_from_models_json: bool
+    removed_from_ollama: bool
 
 @router.get("", response_model=dict[str, ModelEntry])
 async def list_models(manager: ModelManager = Depends(get_model_manager)) -> dict[str, ModelEntry]:
@@ -90,3 +95,24 @@ async def edit_model(alias: Annotated[str, Path(description="Name of a model alr
     except ConfigError as e:                       # models.json could not be written
         raise HTTPException(status_code=500, detail=str(e))
     return ModelEntry(config=updated, pull=manager.pulls.get(alias))
+
+@router.delete("/{alias}", response_model=DeleteResult)
+async def delete_model(alias: Annotated[str, Path(description="Name of a model already registered in models.json")],
+                       remove_from_ollama: Annotated[bool, Query(description="Also delete the model from Ollama (ollama models only). If false, it is only removed from models.json.")] = False,
+                       manager: ModelManager = Depends(get_model_manager)) -> DeleteResult:
+    config = manager.model_config_dict.get(alias)
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"Unknown model {alias}.")
+    if remove_from_ollama and config.provider != "ollama":
+        raise HTTPException(status_code=422, detail="Only ollama models can be removed from Ollama.")
+    try:
+        removed_from_ollama = await manager.delete_model(alias, remove_from_ollama)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DeleteBlockedError as e:                # downloading, or its Ollama tag is shared with another alias
+        raise HTTPException(status_code=409, detail=str(e))
+    except ConnectionError as e:                   # Ollama unreachable or refused
+        raise HTTPException(status_code=503, detail=str(e))
+    except ConfigError as e:                       # models.json could not be written
+        raise HTTPException(status_code=500, detail=str(e))
+    return DeleteResult(alias=alias, removed_from_models_json=True, removed_from_ollama=removed_from_ollama)

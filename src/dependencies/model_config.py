@@ -19,6 +19,9 @@ class DuplicateModelError(ValueError):
 class UnknownModelError(ValueError):
        """The alias is not registered."""
 
+class DeleteBlockedError(ValueError):
+    """The model cannot be deleted right now."""
+
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: Literal["ollama", "openai"]
@@ -222,6 +225,44 @@ class ModelManager():
             self.pulls[alias] = PullState(state="queued")
         self._startup_task = asyncio.create_task(self._pull_in_sequence(missing))
         return missing
+
+    async def delete_model(self, model_name: str, remove_from_ollama: bool = False) -> bool:
+        """Unregisters the model from memory and models.json; with remove_from_ollama also deletes it from Ollama.
+        Returns True if the model was deleted from Ollama.
+        Raises UnknownModelError, DeleteBlockedError, ConnectionError (Ollama problem) or ConfigError."""
+        config = self.model_config_dict.get(model_name)
+        if config is None:
+            raise UnknownModelError(f"Unknown model {model_name}.")
+        state = self.pulls.get(model_name)
+        if state is not None and state.state in ("queued", "pulling"):
+            raise DeleteBlockedError(f"{model_name} is being downloaded: wait for it to finish before deleting it.")
+
+        removed_from_ollama = False
+        if remove_from_ollama:
+            tag = config.model_id
+            others = [a for a, c in self.model_config_dict.items()
+                      if a != model_name and c.provider == "ollama" and c.model_id == tag]
+            if others:
+                raise DeleteBlockedError(f"Ollama model {tag} is also used by: {', '.join(others)}. "
+                                         "Delete those first, or delete this one without remove_from_ollama.")
+            # Ollama goes first: if it fails, nothing has changed yet
+            if self.is_pulled(tag, await self.list_ollama_models()):
+                try:
+                    await self.ollama_client.delete(tag)
+                except ResponseError as e:
+                    raise ConnectionError(f"Ollama could not delete {tag}: {e}") from e
+                removed_from_ollama = True
+
+        if self.model_config_dict.pop(model_name, None) is None:      # another request deleted it during the awaits
+            raise UnknownModelError(f"Unknown model {model_name}.")
+        try:
+            self.save()
+        except OSError as e:
+            self.model_config_dict[model_name] = config               # keep memory and file consistent
+            raise ConfigError(f"Could not write {self.model_config_path}: {e}") from e
+        self.pulls.pop(model_name, None)                              # so a re-added alias doesn't inherit an old status
+        self._pull_tasks.pop(model_name, None)
+        return removed_from_ollama
 
     async def close(self) -> None:
         """Cancels downloads still running when the app shuts down."""
