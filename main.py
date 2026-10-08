@@ -25,16 +25,20 @@ app.include_router(models.router)
 _default_openapi = app.openapi
 
 def custom_openapi() -> dict[str, Any]:
-    app.openapi_schema = None                       # drop FastAPI's cache so the alias list is always current
+    app.openapi_schema = None
     schema = _default_openapi()
     res = getattr(app.state, "res", None)
-    aliases = list(res.model_config_manager.model_config_dict) if res else []
-    if aliases:
-        for path_item in schema["paths"].values():
-            for operation in path_item.values():
-                for param in operation.get("parameters", []):
-                    if param["in"] == "path" and param["name"] == "alias":
-                        param["schema"]["enum"] = aliases   # Swagger renders an enum as a dropdown
+    dropdowns: dict[str, list[str]] = {}
+    if res:
+        manager = res.model_config_manager
+        dropdowns = {"alias": list(manager.model_config_dict),
+                     "deleted_alias": list(manager.model_history)}
+    for path_item in schema["paths"].values():
+        for operation in path_item.values():
+            for param in operation.get("parameters", []):
+                values = dropdowns.get(param["name"])
+                if param["in"] == "path" and values:
+                    param["schema"]["enum"] = values
     return schema
 
 app.openapi = custom_openapi

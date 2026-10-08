@@ -1,7 +1,7 @@
 from typing import Annotated
 from pydantic import BaseModel, ConfigDict, ValidationError
 from fastapi import APIRouter, Depends, Form, HTTPException, Path, Query, Request, Response
-from src.dependencies.model_config import (ConfigError, ModelConfig, ModelManager, PullState,
+from src.dependencies.model_config import (ConfigError, ModelConfig, ModelManager, PullState, HistoryEntry,
                                            DuplicateModelError, UnknownModelError, DeleteBlockedError)
 
 router = APIRouter(prefix="/models", tags=["Models"])
@@ -116,3 +116,28 @@ async def delete_model(alias: Annotated[str, Path(description="Name of a model a
     except ConfigError as e:                       # models.json could not be written
         raise HTTPException(status_code=500, detail=str(e))
     return DeleteResult(alias=alias, removed_from_models_json=True, removed_from_ollama=removed_from_ollama)
+
+@router.get("/history", response_model=dict[str, HistoryEntry])
+async def deleted_models(manager: ModelManager = Depends(get_model_manager)) -> dict[str, HistoryEntry]:
+    return manager.model_history
+
+@router.post("/{deleted_alias}/restore", response_model=ModelEntry)
+async def restore_model(deleted_alias: Annotated[str, Path(description="Name of a deleted model (see GET /models/history)")],
+                        response: Response,
+                        manager: ModelManager = Depends(get_model_manager)) -> ModelEntry:
+    try:
+        pulling = await manager.restore_model(deleted_alias)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DuplicateModelError as e:               # a model with this alias was registered after the deletion
+        raise HTTPException(status_code=409, detail=str(e))
+    except ConnectionError as e:                   # Ollama unreachable
+        raise HTTPException(status_code=503, detail=str(e))
+    except ConfigError as e:                       # models.json could not be written
+        raise HTTPException(status_code=500, detail=str(e))
+    if pulling:
+        response.status_code = 202                 # download continues in the background
+    config = manager.model_config_dict[deleted_alias]
+    return ModelEntry(config=config,
+                      available=(not pulling) if config.provider == "ollama" else None,
+                      pull=manager.pulls.get(deleted_alias))

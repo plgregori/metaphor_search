@@ -11,7 +11,8 @@ class Resources():
     def __init__(self) -> None:
         model_config_path = os.getenv("MODEL_CONFIG_PATH", "configuration/models.json")
         ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        self.model_config_manager = ModelManager.load_from_json(model_config_path, ollama_url)
+        model_history_path = os.getenv("MODEL_HISTORY_PATH", "data/model_history.json")
+        self.model_config_manager = ModelManager.load_from_json(model_config_path, ollama_url, model_history_path)
         self.openai_client = None
 
     async def initialize(self) -> None:
