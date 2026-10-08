@@ -1,17 +1,25 @@
 from dotenv import load_dotenv
-import os
-from src.dataset_utils import load_dataset
-from src.openai_utils import openai_initializer, prompt_openai_simple
+from fastapi import FastAPI
+from typing import AsyncGenerator
+from src.dependencies.resources import Resources
+from src.routers import models
+from contextlib import asynccontextmanager
+import uvicorn
 
 load_dotenv()
 
-dataset = load_dataset()
-openai_key = os.getenv('OPENAI_API_KEY')
-test_text = dataset.iloc[0]['plain']
-print('Input text:')
-print(test_text[:200] + '...' if len(test_text) > 200 else test_text)
+@asynccontextmanager
+async def lifespan(api: FastAPI) -> AsyncGenerator[None, None]:
+    resources = Resources()
+    try:
+        await resources.initialize()
+        api.state.res = resources
+        yield
+    finally:
+        await resources.close()
 
-if openai_key:
-    openai_client = openai_initializer(openai_key)
-    result_openai_prompt = prompt_openai_simple(openai_client, test_text)
-    print(result_openai_prompt)
+app = FastAPI(lifespan=lifespan)
+app.include_router(models.router)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8001)
