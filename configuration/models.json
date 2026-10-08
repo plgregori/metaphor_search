@@ -1,8 +1,8 @@
 {
-    "qwen-3.8-27b": {
+    "qwen-2.5-3b": {
         "provider": "ollama",
-        "model_id": "qwen3.8:27b",
-        "hf_id": "Qwen/Qwen3.8-27B",
+        "model_id": "qwen2.5:3b",
+        "hf_id": null,
         "fine_tuning": false,
         "rag": true,
         "prompt_engineering": true

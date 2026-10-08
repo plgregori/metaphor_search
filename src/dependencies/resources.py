@@ -18,6 +18,7 @@ class Resources():
         openai_api_key = os.getenv("OPENAI_API_KEY")
         if openai_api_key:
             self.openai_client = AsyncOpenAI(api_key=openai_api_key)
+        await self.model_config_manager.pull_missing()
 
     async def close(self) -> None:
         try:

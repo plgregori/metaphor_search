@@ -1,8 +1,9 @@
-import pandas as pd
-from src.visualization import visualize, save_html
-
-ex = pd.read_csv("results/Example.csv")
-gold = pd.read_csv("corpus/metaphor_dataset.csv").set_index("textid")
-
-row = ex[ex.prompt_strategy == "Zero shot"].iloc[0]
-save_html(visualize(row["answer"], gold.loc[row["textid"], "metaphor_tagged_text"]), "outputs/example.html")
+''',
+    "llama3.2-latest": {
+        "provider": "ollama",
+        "model_id": "llama3.2:latest",
+        "hf_id": null,
+        "fine_tuning": false,
+        "rag": true,
+        "prompt_engineering": true
+    }'''
