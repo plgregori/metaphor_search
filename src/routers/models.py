@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict
-from src.dependencies.model_config import ConfigError, ModelConfig, ModelManager, PullState, DuplicateModelError
 from typing import Annotated
+from fastapi import APIRouter, Depends, Form, HTTPException, Path, Request, Response
+from pydantic import BaseModel, ConfigDict, ValidationError
+from src.dependencies.model_config import (ConfigError, ModelConfig, ModelManager, PullState,
+                                              DuplicateModelError, UnknownModelError)
 
-router = APIRouter(prefix="/models", tags=["models"])
+router = APIRouter(prefix="/models", tags=["Models"])
 
 def get_model_manager(request: Request) -> ModelManager:
     return request.app.state.res.model_config_manager
@@ -55,3 +56,37 @@ async def pull_model(alias: str, manager: ModelManager = Depends(get_model_manag
     manager.start_pull(alias)
     availability = await manager.availability()
     return ModelEntry(config=config, available=availability.get(alias), pull=manager.pulls.get(alias))
+
+@router.patch("/{alias}", response_model=ModelEntry)
+async def edit_model(alias: Annotated[str, Path(description="Name of a model already registered in models.json")],
+                    fine_tuning: Annotated[bool | None, Form()] = None,
+                    rag: Annotated[bool | None, Form()] = None,
+                    prompt_engineering: Annotated[bool | None, Form()] = None,
+                    hf_id: Annotated[str | None, Form(description="Hugging Face id. Leave empty to keep the current one.")] = None,
+                    clear_hf_id: Annotated[bool, Form(description="Set to true to remove the current hf_id.")] = False,
+                    manager: ModelManager = Depends(get_model_manager)) -> ModelEntry:
+    changes: dict[str, bool | str | None] = {}
+    if fine_tuning is not None:
+        changes["fine_tuning"] = fine_tuning
+    if rag is not None:
+        changes["rag"] = rag
+    if prompt_engineering is not None:
+        changes["prompt_engineering"] = prompt_engineering
+    if hf_id is not None and hf_id.strip():
+        changes["hf_id"] = hf_id.strip()
+    if clear_hf_id:
+        if "hf_id" in changes:
+            raise HTTPException(status_code=422, detail="Give either hf_id or clear_hf_id, not both.")
+        changes["hf_id"] = None
+    if not changes:
+        raise HTTPException(status_code=422, detail="Nothing to change: set at least one field.")
+
+    try:
+        updated = manager.edit_model(alias, changes)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValidationError as e:                   # e.g. fine_tuning=true on an ollama model without hf_id
+        raise HTTPException(status_code=422, detail=e.errors(include_url=False, include_context=False))
+    except ConfigError as e:                       # models.json could not be written
+        raise HTTPException(status_code=500, detail=str(e))
+    return ModelEntry(config=updated, pull=manager.pulls.get(alias))

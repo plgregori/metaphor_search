@@ -16,6 +16,9 @@ class ConfigError(ValueError):
 class DuplicateModelError(ValueError):
     """The alias is already registered."""
 
+class UnknownModelError(ValueError):
+       """The alias is not registered."""
+
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: Literal["ollama", "openai"]
@@ -143,6 +146,24 @@ class ModelManager():
         if needs_pull:
             self.start_pull(model_name)
         return needs_pull
+
+    def edit_model(self, model_name: str, changes: dict[str, bool | str | None]) -> ModelConfig:
+           """Changes fine_tuning / rag / prompt_engineering / hf_id of a registered model, in memory and in models.json.
+           Raises UnknownModelError, pydantic.ValidationError (the result would be invalid) or ConfigError."""
+           current = self.model_config_dict.get(model_name)
+           if current is None:
+               raise UnknownModelError(f"Unknown model {model_name}.")
+
+           # A new ModelConfig, not model_copy(update=...): that would skip the validators
+           updated = ModelConfig(**{**current.model_dump(), **changes})  # pyright: ignore[reportUnknownArgumentType]
+
+           self.model_config_dict[model_name] = updated
+           try:
+               self.save()
+           except OSError as e:
+               self.model_config_dict[model_name] = current        # keep memory and file consistent
+               raise ConfigError(f"Could not write {self.model_config_path}: {e}") from e
+           return updated
 
     async def availability(self) -> dict[str, bool | None]:
         """True/False for ollama models; None for other providers or when Ollama is unreachable."""
