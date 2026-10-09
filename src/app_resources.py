@@ -1,5 +1,5 @@
 from openai import AsyncOpenAI
-from src.model_management.manager import ModelManager
+from model_management.model_manager import ModelManager
 import os
 
 class AppResources():

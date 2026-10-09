@@ -1,7 +1,7 @@
 from typing import Annotated
 from pydantic import BaseModel, ConfigDict, ValidationError
 from fastapi import APIRouter, Depends, Form, HTTPException, Path, Query, Response
-from src.model_management.manager import ModelManager
+from src.model_management.model_manager import ModelManager
 from src.model_management.schemas import ModelConfig, PullState, HistoryEntry
 from src.errors import UnknownModelError
 from src.api.dependencies import get_model_manager
