@@ -1,8 +1,8 @@
 from openai import AsyncOpenAI
-from src.dependencies.model_config import ModelManager
+from src.model_management.manager import ModelManager
 import os
 
-class Resources():
+class AppResources():
     model_config_manager: ModelManager
 
     openai_client: AsyncOpenAI | None
