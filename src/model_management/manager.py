@@ -4,54 +4,22 @@ from json import JSONDecodeError
 import logging
 import os
 from pathlib import Path
-from typing import Literal, Self
 from ollama import AsyncClient, ResponseError
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator, field_validator
+from pydantic import TypeAdapter, ValidationError
 from datetime import datetime, timezone
+from src.model_management.schemas import ModelConfig, HistoryEntry, PullState
+from src.errors import (ConfigError, DeleteBlockedError, DuplicateModelError,
+                                           OllamaUnavailableError, UnknownModelError)
 
 logger = logging.getLogger("uvicorn.error")
 
-class ConfigError(ValueError):
-    """Models configuration file missing, unreadable or invalid."""
-
-class DuplicateModelError(ValueError):
-    """The alias is already registered."""
-
-class UnknownModelError(ValueError):
-       """The alias is not registered."""
-
-class DeleteBlockedError(ValueError):
-    """The model cannot be deleted right now."""
-
-class ModelConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    provider: Literal["ollama", "openai"]
-    model_id: str               # name the provider's API uses (Ollama tag, OpenAI model name...)
-    hf_id: str | None = None    # Hugging Face ID: only needed to fine-tune a local model
-    fine_tuning: bool
-    rag: bool
-    prompt_engineering: bool
-
-    @field_validator("hf_id", mode="before")
-    @classmethod
-    def _blank_hf_id_is_none(cls, value: object) -> object:
-        return None if isinstance(value, str) and not value.strip() else value   # an empty form box means "not set"
-
-    @model_validator(mode="after")
-    def _hf_id_for_local_fine_tuning(self) -> Self:
-        if self.provider == "ollama" and self.fine_tuning and not self.hf_id:
-            raise ValueError("Hugging Face id is required for an ollama model with fine_tuning enabled")
-        return self
-
-class HistoryEntry(BaseModel):
-    config: ModelConfig
-    deleted_at: datetime
-    removed_from_ollama: bool
-
-class PullState(BaseModel):
-    state: Literal["queued", "pulling", "done", "failed"]
-    percent: float | None = None   # progress of the layer being downloaded
-    detail: str | None = None
+def _atomic_write(path_str: str, data: bytes) -> None:
+    """Writes to a temporary file, then swaps it in: a crash mid-write can't leave a half-written file."""
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 _MODELS_ADAPTER = TypeAdapter(dict[str, ModelConfig])
 _HISTORY_ADAPTER = TypeAdapter(dict[str, HistoryEntry])
@@ -105,25 +73,38 @@ class ModelManager():
             raise ConfigError(f"Model history file could not be read ({path}): {e}") from e
 
     def save_history(self) -> None:
-        path = Path(self.model_history_path)
-        path.parent.mkdir(parents=True, exist_ok=True)      # creates data/ if needed
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(_HISTORY_ADAPTER.dump_json(self.model_history, indent=4))
-        os.replace(tmp, path)
+        _atomic_write(self.model_history_path, _HISTORY_ADAPTER.dump_json(self.model_history, indent=4))
 
     def save(self) -> None:
-        path = Path(self.model_config_path)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(_MODELS_ADAPTER.dump_json(self.model_config_dict, indent=4))
-        os.replace(tmp, path)  
+        _atomic_write(self.model_config_path, _MODELS_ADAPTER.dump_json(self.model_config_dict, indent=4))
+
+    def _persist_change(self, model_name: str, new_config: ModelConfig | None) -> None:
+        """Sets one entry (or removes it, with None) and writes models.json.
+        If the write fails, memory is put back as it was and ConfigError is raised."""
+        previous = self.model_config_dict.get(model_name)
+        if new_config is None:
+            self.model_config_dict.pop(model_name, None)
+        else:
+            self.model_config_dict[model_name] = new_config
+        try:
+            self.save()
+        except OSError as e:
+            if previous is None:
+                self.model_config_dict.pop(model_name, None)
+            else:
+                self.model_config_dict[model_name] = previous
+            raise ConfigError(f"Could not write {self.model_config_path}: {e}") from e
+  
 
     async def list_ollama_models(self) -> set[str]:
         try:
             response = await asyncio.wait_for(self.ollama_client.list(), timeout=5)
         except asyncio.TimeoutError as e:
-            raise ConnectionError(f"Ollama did not answer within 5 seconds at {self.ollama_url}.") from e
+            raise OllamaUnavailableError(f"Ollama did not answer within 5 seconds at {self.ollama_url}.") from e
         except ResponseError as e:
-            raise ConnectionError(f"Ollama answered with an error: {e}") from e
+            raise OllamaUnavailableError(f"Ollama answered with an error: {e}") from e
+        except ConnectionError as e:                    # the ollama library's own "cannot connect"
+            raise OllamaUnavailableError(f"Cannot reach Ollama at {self.ollama_url}: {e}") from e
         return {m.model for m in response.models if m.model}
 
     @staticmethod
@@ -166,12 +147,7 @@ class ModelManager():
         if model_name in self.model_config_dict:        # re-check: another request may have added it during the await
             raise DuplicateModelError(f"Model {model_name} already loaded!")
 
-        self.model_config_dict[model_name] = model_config
-        try:
-            self.save()
-        except OSError as e:
-            del self.model_config_dict[model_name]          # keep memory and file consistent
-            raise ConfigError(f"Could not write {self.model_config_path}: {e}") from e
+        self._persist_change(model_name, model_config)
 
         if needs_pull:
             self.start_pull(model_name)
@@ -187,12 +163,7 @@ class ModelManager():
            # A new ModelConfig, not model_copy(update=...): that would skip the validators
            updated = ModelConfig(**{**current.model_dump(), **changes})  # pyright: ignore[reportUnknownArgumentType]
 
-           self.model_config_dict[model_name] = updated
-           try:
-               self.save()
-           except OSError as e:
-               self.model_config_dict[model_name] = current        # keep memory and file consistent
-               raise ConfigError(f"Could not write {self.model_config_path}: {e}") from e
+           self._persist_change(model_name, updated)
            return updated
 
     async def availability(self) -> dict[str, bool | None]:
@@ -276,17 +247,13 @@ class ModelManager():
             if self.is_pulled(tag, await self.list_ollama_models()):
                 try:
                     await self.ollama_client.delete(tag)
-                except ResponseError as e:
-                    raise ConnectionError(f"Ollama could not delete {tag}: {e}") from e
+                except (ResponseError, ConnectionError) as e:
+                    raise OllamaUnavailableError(f"Ollama could not delete {tag}: {e}") from e
                 removed_from_ollama = True
 
-        if self.model_config_dict.pop(model_name, None) is None:      # another request deleted it during the awaits
+        if model_name not in self.model_config_dict:                   # another request deleted it during the awaits
             raise UnknownModelError(f"Unknown model {model_name}.")
-        try:
-            self.save()
-        except OSError as e:
-            self.model_config_dict[model_name] = config               # keep memory and file consistent
-            raise ConfigError(f"Could not write {self.model_config_path}: {e}") from e
+        self._persist_change(model_name, None)
         self.pulls.pop(model_name, None)                              # so a re-added alias doesn't inherit an old status
         self._pull_tasks.pop(model_name, None)
         self.model_history[model_name] = HistoryEntry(config=config, deleted_at=datetime.now(timezone.utc),
