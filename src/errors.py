@@ -12,3 +12,6 @@ class DeleteBlockedError(ValueError):
 
 class OllamaUnavailableError(ConnectionError):
     """Ollama is unreachable, too slow, or refused the request."""
+
+class PromptFileError(ValueError):
+    """A prompts CSV file is missing, unreadable or invalid."""

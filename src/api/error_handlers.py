@@ -1,12 +1,13 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from src.errors import (ConfigError, DeleteBlockedError, DuplicateModelError,
+from src.errors import (ConfigError, DeleteBlockedError, DuplicateModelError, PromptFileError,
                                            OllamaUnavailableError, UnknownModelError)
 
 _STATUS_BY_ERROR: dict[type[Exception], int] = {
     UnknownModelError: 404,
     DuplicateModelError: 409,
     DeleteBlockedError: 409,
+    PromptFileError: 422,
     OllamaUnavailableError: 503,
     ConfigError: 500,
 }
