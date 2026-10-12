@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from src.errors import (ConfigError, DeleteBlockedError, DuplicateModelError, PromptFileError,
-                                           OllamaUnavailableError, UnknownModelError)
+from src.errors import (ConfigError, DeleteBlockedError, DuplicateModelError, PromptFileError, UnknownRunError,
+                        OllamaUnavailableError, UnknownModelError, InvalidRunRequestError, RunStateError)
 
 _STATUS_BY_ERROR: dict[type[Exception], int] = {
     UnknownModelError: 404,
@@ -10,6 +10,9 @@ _STATUS_BY_ERROR: dict[type[Exception], int] = {
     PromptFileError: 422,
     OllamaUnavailableError: 503,
     ConfigError: 500,
+    InvalidRunRequestError: 422,
+    RunStateError: 409,
+    UnknownRunError: 404,
 }
 
 def register_error_handlers(app: FastAPI) -> None:

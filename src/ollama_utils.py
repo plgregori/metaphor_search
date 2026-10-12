@@ -1,7 +1,7 @@
 from ollama import ChatResponse, Client
 from pandas import DataFrame
 from tqdm.auto import tqdm
-from src.prompt_engineering import inject_test_text
+from prompt_engineering_legacy import inject_test_text
 from typing import cast, Any
 import time
 import numpy as np

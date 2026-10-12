@@ -10,7 +10,7 @@ from ollama import Client
 from src.transformers_utils import prepare_finetuning_data_transformers
 from src.evaluation import (parse_metaphor_tags, evaluate_all_samples, evaluate_predictions, identify_no_metaphors,
                             summarize_scores)
-from src.prompt_engineering import dataset_preparation, load_prompt_strategies
+from src.prompt_engineering_legacy import dataset_preparation, load_prompt_strategies
 from dotenv import load_dotenv
 import os
 from pathlib import Path

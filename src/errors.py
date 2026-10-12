@@ -15,3 +15,12 @@ class OllamaUnavailableError(ConnectionError):
 
 class PromptFileError(ValueError):
     """A prompts CSV file is missing, unreadable or invalid."""
+
+class InvalidRunRequestError(ValueError):
+    """The run request cannot be executed as asked."""
+
+class RunStateError(ValueError):
+    """The operation is not possible in the run's current state (another run is active, or this one is not running)."""
+
+class UnknownRunError(ValueError):
+    """The run id does not exist."""

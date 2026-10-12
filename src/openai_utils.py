@@ -10,7 +10,7 @@ from typing import cast
 from pathlib import Path
 from io import BytesIO
 import re
-from src.prompt_engineering import inject_test_text
+from src.prompt_engineering_legacy import inject_test_text
 
 MODEL_PRICING_PER_1M_TOKENS = {
     # --- Core GPT-5 family ---
